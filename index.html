@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <title>Banks Games</title>
+  <meta name="description" content="A little suite of multiplayer card and tile games for playing with friends." />
+  <meta name="theme-color" content="#14161c" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Banks Games" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="icon" href="./icons/icon192.png" />
+  <link rel="apple-touch-icon" href="./icons/icon192.png" />
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <div class="boot">
+      <div class="boot-mark">Banks Games</div>
+      <div class="boot-msg" id="boot-msg">Connecting…</div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script type="module">
+    import { startRouter } from './js/router.js';
+    startRouter();
+  </script>
+
+  <script>
+    // Service worker lives at the repo root so its scope covers the whole subpath.
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').catch((err) => {
+          console.warn('[sw] registration failed', err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
