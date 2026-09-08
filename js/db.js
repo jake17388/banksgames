@@ -6,35 +6,51 @@
  * denied" in the console means your rules are wrong, not that you raced auth.
  */
 
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
-import {
-  getAuth,
-  signInAnonymously,
-  onAuthStateChanged
-} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
-import {
-  getDatabase,
-  ref,
-  child,
-  get,
-  set,
-  update,
-  remove,
-  onValue,
-  onDisconnect,
-  runTransaction,
-  serverTimestamp
-} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js';
-
 import { firebaseConfig, isPlaceholderConfig } from './firebaseconfig.js';
 import { setPlayerId } from './session.js';
 
 export const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no O, 0, I, 1
 export const CODE_LENGTH = 4;
 
-export const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getDatabase(app);
+const SDK = 'https://www.gstatic.com/firebasejs/10.12.2';
+
+/*
+ * The Firebase SDK is imported lazily, on purpose.
+ *
+ * A static import of the CDN would make this module — and therefore the home
+ * screen — fail to load whenever gstatic.com is slow, blocked, or simply
+ * offline. The service worker cannot cache cross-origin modules, so that would
+ * mean the installed app shows nothing at all on a bad connection. Loading it
+ * on demand lets the app paint first and fail only where Firebase is actually
+ * needed.
+ */
+let sdkPromise = null;
+
+function loadSdk() {
+  if (sdkPromise) return sdkPromise;
+  sdkPromise = (async () => {
+    let appMod;
+    let authMod;
+    let dbMod;
+    try {
+      [appMod, authMod, dbMod] = await Promise.all([
+        import(`${SDK}/firebase-app.js`),
+        import(`${SDK}/firebase-auth.js`),
+        import(`${SDK}/firebase-database.js`)
+      ]);
+    } catch (err) {
+      console.error('[db] could not load the Firebase SDK', err);
+      throw new Error('Could not reach Firebase. Check your connection and reload.');
+    }
+
+    const app = appMod.initializeApp(firebaseConfig);
+    return { app, auth: authMod.getAuth(app), db: dbMod.getDatabase(app), authMod, dbMod };
+  })();
+  return sdkPromise;
+}
+
+let handles = null;
+let uid = null;
 
 /** Resolves with the anonymous auth UID. Everything else waits on this. */
 export const ready = (async () => {
@@ -44,47 +60,63 @@ export const ready = (async () => {
     );
   }
 
+  handles = await loadSdk();
+  const { auth, authMod } = handles;
+
   const existing = await new Promise((resolve) => {
-    const stop = onAuthStateChanged(auth, (user) => {
+    const stop = authMod.onAuthStateChanged(auth, (user) => {
       stop();
       resolve(user);
     });
   });
 
-  const user = existing || (await signInAnonymously(auth)).user;
-  setPlayerId(user.uid);
-  return user.uid;
+  const user = existing || (await authMod.signInAnonymously(auth)).user;
+  uid = user.uid;
+  setPlayerId(uid);
+  return uid;
 })();
 
+// Every consumer handles this rejection itself (the router surfaces it on the
+// home screen). This no-op keeps the browser from also logging it as an
+// unhandled rejection before the first handler attaches.
+ready.catch(() => {});
+
 export function currentUid() {
-  return auth.currentUser ? auth.currentUser.uid : null;
+  return uid;
+}
+
+/** Raw SDK handles, for anything this module does not wrap yet. */
+export async function getHandles() {
+  await ready;
+  return handles;
 }
 
 /* --- low level path helpers ---------------------------------------------- */
 
-export function pathRef(path) {
-  return ref(db, path);
+async function refFor(path) {
+  await ready;
+  return handles.dbMod.ref(handles.db, path);
 }
 
 export async function readOnce(path) {
-  await ready;
-  const snap = await get(ref(db, path));
+  const node = await refFor(path);
+  const snap = await handles.dbMod.get(node);
   return snap.exists() ? snap.val() : null;
 }
 
 export async function writeAt(path, value) {
-  await ready;
-  return set(ref(db, path), value);
+  const node = await refFor(path);
+  return handles.dbMod.set(node, value);
 }
 
 export async function updateAt(path, patch) {
-  await ready;
-  return update(ref(db, path), patch);
+  const node = await refFor(path);
+  return handles.dbMod.update(node, patch);
 }
 
 export async function removeAt(path) {
-  await ready;
-  return remove(ref(db, path));
+  const node = await refFor(path);
+  return handles.dbMod.remove(node);
 }
 
 /**
@@ -93,8 +125,8 @@ export async function removeAt(path) {
  * Returns { committed, value }.
  */
 export async function transactAt(path, fn) {
-  await ready;
-  const result = await runTransaction(ref(db, path), fn);
+  const node = await refFor(path);
+  const result = await handles.dbMod.runTransaction(node, fn);
   return { committed: result.committed, value: result.snapshot.val() };
 }
 
@@ -105,8 +137,8 @@ export function subscribe(path, callback, onError) {
   ready
     .then(() => {
       if (stopped) return;
-      off = onValue(
-        ref(db, path),
+      off = handles.dbMod.onValue(
+        handles.dbMod.ref(handles.db, path),
         (snap) => callback(snap.exists() ? snap.val() : null),
         (err) => {
           console.error('[db] subscribe failed at', path, err);
@@ -123,8 +155,6 @@ export function subscribe(path, callback, onError) {
     off();
   };
 }
-
-export const TIMESTAMP = serverTimestamp();
 
 /* --- room codes ----------------------------------------------------------- */
 
@@ -158,19 +188,19 @@ export function isValidCode(code) {
  * value we abort and try a different code.
  */
 export async function createRoom(gameId, playerName) {
-  const uid = await ready;
+  const me = await ready;
 
   for (let attempt = 0; attempt < 12; attempt += 1) {
     const code = randomCode();
     const room = {
       meta: {
         gameId,
-        hostId: uid,
+        hostId: me,
         status: 'lobby',
         createdAt: Date.now()
       },
       players: {
-        [uid]: {
+        [me]: {
           name: playerName,
           seat: 0,
           online: true,
@@ -195,12 +225,12 @@ export async function createRoom(gameId, playerName) {
  * game — that is what makes closing the app and coming back survivable.
  */
 export async function joinRoom(code, playerName, maxPlayers) {
-  const uid = await ready;
+  const me = await ready;
 
   const { committed, value } = await transactAt(`rooms/${code}`, (room) => {
     if (room === null || room === undefined) return undefined; // no such room
     const players = room.players || {};
-    const mine = players[uid];
+    const mine = players[me];
 
     if (mine) {
       // Rejoin: keep the seat, refresh the name.
@@ -219,7 +249,7 @@ export async function joinRoom(code, playerName, maxPlayers) {
     let seat = 0;
     while (seats.includes(seat)) seat += 1;
 
-    players[uid] = { name: playerName, seat, online: true, lastSeen: Date.now() };
+    players[me] = { name: playerName, seat, online: true, lastSeen: Date.now() };
     room.players = players;
     return room;
   });
@@ -239,14 +269,14 @@ export async function joinRoom(code, playerName, maxPlayers) {
  * player so the room never dies with one device.
  */
 export async function leaveRoom(code) {
-  const uid = await ready;
-  await cancelPresence(code, uid);
+  const me = await ready;
+  await cancelPresence(code, me);
 
   await transactAt(`rooms/${code}`, (room) => {
     if (!room) return undefined;
     const players = room.players || {};
-    if (!players[uid]) return undefined;
-    delete players[uid];
+    if (!players[me]) return undefined;
+    delete players[me];
 
     const remaining = Object.entries(players).sort(
       (a, b) => (a[1].seat || 0) - (b[1].seat || 0)
@@ -254,7 +284,7 @@ export async function leaveRoom(code) {
 
     if (remaining.length === 0) return null; // last one out turns off the lights
 
-    if (room.meta && room.meta.hostId === uid) {
+    if (room.meta && room.meta.hostId === me) {
       room.meta.hostId = remaining[0][0];
     }
     room.players = players;
@@ -264,10 +294,10 @@ export async function leaveRoom(code) {
 
 /** Any player can adopt the host role — used when the host has gone dark. */
 export async function claimHost(code) {
-  const uid = await ready;
+  const me = await ready;
   const { committed } = await transactAt(`rooms/${code}/meta`, (meta) => {
     if (!meta) return undefined;
-    meta.hostId = uid;
+    meta.hostId = me;
     return meta;
   });
   return committed;
@@ -282,37 +312,40 @@ const disconnectHandles = new Map();
  * that flip it offline the moment the socket drops (phone locks, tunnel dies).
  * Re-registered on every reconnect via .info/connected.
  */
-export function attachPresence(code, uid) {
-  const onlineRef = ref(db, `rooms/${code}/players/${uid}/online`);
-  const seenRef = ref(db, `rooms/${code}/players/${uid}/lastSeen`);
-  const connectedRef = ref(db, '.info/connected');
-
+export function attachPresence(code, playerId) {
   let stop = () => {};
-  ready.then(() => {
-    stop = onValue(connectedRef, async (snap) => {
-      if (snap.val() !== true) return;
-      const od = onDisconnect(onlineRef);
-      const odSeen = onDisconnect(seenRef);
-      disconnectHandles.set(`${code}/${uid}`, [od, odSeen]);
-      try {
-        await od.set(false);
-        await odSeen.set(serverTimestamp());
-        await set(onlineRef, true);
-        await set(seenRef, serverTimestamp());
-      } catch (err) {
-        console.warn('[presence] could not write presence', err);
-      }
-    });
-  });
+  ready
+    .then(() => {
+      const { ref, onValue, onDisconnect, set, serverTimestamp } = handles.dbMod;
+      const onlineRef = ref(handles.db, `rooms/${code}/players/${playerId}/online`);
+      const seenRef = ref(handles.db, `rooms/${code}/players/${playerId}/lastSeen`);
+      const connectedRef = ref(handles.db, '.info/connected');
+
+      stop = onValue(connectedRef, async (snap) => {
+        if (snap.val() !== true) return;
+        // Re-registered on every reconnect: onDisconnect handlers are consumed
+        // when they fire, so a dropped socket must arm a fresh pair.
+        const od = onDisconnect(onlineRef);
+        const odSeen = onDisconnect(seenRef);
+        disconnectHandles.set(`${code}/${playerId}`, [od, odSeen]);
+        try {
+          await od.set(false);
+          await odSeen.set(serverTimestamp());
+          await set(onlineRef, true);
+          await set(seenRef, serverTimestamp());
+        } catch (err) {
+          console.warn('[presence] could not write presence', err);
+        }
+      });
+    })
+    .catch((err) => console.warn('[presence] not attached', err));
 
   return () => stop();
 }
 
-async function cancelPresence(code, uid) {
-  const handles = disconnectHandles.get(`${code}/${uid}`);
-  disconnectHandles.delete(`${code}/${uid}`);
-  if (!handles) return;
-  await Promise.all(handles.map((h) => h.cancel().catch(() => {})));
+async function cancelPresence(code, playerId) {
+  const armed = disconnectHandles.get(`${code}/${playerId}`);
+  disconnectHandles.delete(`${code}/${playerId}`);
+  if (!armed) return;
+  await Promise.all(armed.map((h) => h.cancel().catch(() => {})));
 }
-
-export { ref, child, onValue, serverTimestamp };

@@ -3,7 +3,7 @@
 import { GAMES } from './games/registry.js';
 import { getDisplayName, setDisplayName, hasName, getLastRoom } from './session.js';
 import { createRoom, joinRoom, normalizeCode, isValidCode, readOnce, CODE_LENGTH } from './db.js';
-import { el, toast, goToRoom } from './router.js';
+import { el, toast, goToRoom, onAuthError } from './router.js';
 
 export async function mountHome(container) {
   const screen = el('div', { class: 'screen' });
@@ -39,6 +39,16 @@ export async function mountHome(container) {
 
   const nameHint = el('p', { class: 'hint', text: 'Saved on this device. Change it any time.' });
   body.appendChild(nameHint);
+
+  // Firebase not configured (or unreachable): the screen still works, but say
+  // plainly why nothing can be created or joined.
+  const authBanner = el('p', { class: 'hint error' });
+  authBanner.hidden = true;
+  body.appendChild(authBanner);
+  const stopAuthWatch = onAuthError((err) => {
+    authBanner.textContent = err && err.message ? err.message : 'Could not sign in to Firebase.';
+    authBanner.hidden = false;
+  });
 
   body.appendChild(el('div', { class: 'section-label', text: 'Games' }));
   const grid = el('div', { class: 'game-grid' });
@@ -120,6 +130,7 @@ export async function mountHome(container) {
   if (!hasName()) window.setTimeout(() => nameInput.focus(), 120);
 
   return () => {
+    stopAuthWatch();
     closeSheet();
   };
 }

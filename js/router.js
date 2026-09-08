@@ -102,21 +102,28 @@ export async function startRouter() {
   if (booted) return;
   booted = true;
 
-  const msg = document.getElementById('boot-msg');
-
-  try {
-    await ready;
-  } catch (err) {
-    console.error('[boot] auth failed', err);
-    if (msg) {
-      msg.classList.add('error');
-      msg.textContent = err.message || 'Could not sign in to Firebase.';
-    }
-    return;
-  }
-
+  // Paint the first screen without waiting on the network. Anonymous auth
+  // resolves in the background; the screens that actually need it (anything
+  // that talks to a room) await `ready` themselves.
   window.addEventListener('hashchange', render);
   await render();
+
+  ready.catch((err) => {
+    console.error('[boot] auth failed', err);
+    authError = err;
+    for (const listener of authListeners) listener(err);
+  });
+}
+
+/* --- auth failure, surfaced by whichever screen is showing ---------------- */
+
+let authError = null;
+const authListeners = new Set();
+
+export function onAuthError(callback) {
+  if (authError) callback(authError);
+  authListeners.add(callback);
+  return () => authListeners.delete(callback);
 }
 
 /* --- shared UI helpers used by every screen ------------------------------- */

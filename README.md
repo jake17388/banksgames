@@ -131,6 +131,16 @@ Room codes are four characters from `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` — no `O
 `I` or `1`, so nobody has to ask "letter or number?" over the phone. Claiming a code is a
 transaction, so two people creating a room at the same instant cannot land on the same one.
 
+### Why the Firebase SDK loads lazily
+
+`js/db.js` pulls the Firebase modules in with a dynamic `import()` rather than a static
+one. A service worker cannot cache cross-origin modules, so a static import would mean the
+installed app renders **nothing** whenever `gstatic.com` is slow, blocked, or you are
+offline — the shell would be cached and useless. Loading on demand lets the home screen
+paint from cache and fail only where Firebase is genuinely needed. It also means you can
+open the app and see the main screen before you have pasted any config at all; it will just
+tell you, in place, that it is not configured.
+
 ### Presence
 
 Every client watches `.info/connected` and, on each connect, registers an
